@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Deteksi Skala Nyeri & Edukasi Interaktif Persalinan Nyaman</title>
+  <style>
+    body { 
+      font-family: "Segoe UI", Arial, sans-serif; 
+      background: #fff5f7; 
+      color: #4a1c40; 
+      margin: 0; padding: 0;
+    }
+    header { 
+      background: linear-gradient(90deg,#fbb6ce,#f9a8d4,#f0abfc);
+      padding: 12px 16px; 
+      color: #4a1c40; 
+      display: flex; 
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      border-bottom-left-radius: 20px;
+      border-bottom-right-radius: 20px;
+    }
+    header img { height: 50px; }
+    header h1 { font-size: 18px; font-weight: bold; margin: 0; text-align: center; }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; margin:14px 0; justify-content:center; }
+    .controls button, .controls select { 
+      padding:10px 14px; border-radius:10px; border:none; cursor:pointer; 
+      background:#fbb6ce; color:#4a1c40; font-weight:600;
+    }
+    video, canvas { 
+      width:100%; max-width:500px; border-radius:16px; margin-top:10px; 
+      border: 3px solid #f9a8d4; box-shadow:0 4px 12px rgba(0,0,0,0.1);
+    }
+    #snapshot { margin-top:12px; }
+    #cameraStatus { margin-top:12px; font-size:15px; padding:10px; border-radius:8px; text-align:center; }
+    #cameraStatus.ok { background:#e6fffa; color:#047857; }
+    #cameraStatus.err { background:#fef2f2; color:#b91c1c; }
+    #cameraStatus.warn { background:#fff7ed; color:#b45309; }
+    .dial { font-size:32px; font-weight:bold; margin:14px 0; text-align:center; padding:10px; border-radius:12px; }
+    .dial.ok { background:#dcfce7; color:#166534; }
+    .dial.mid { background:#fef9c3; color:#92400e; }
+    .dial.hi { background:#fee2e2; color:#991b1b; }
+    .eduBox { margin-top:16px; padding:14px; border-radius:12px; font-size:15px; line-height:1.5; text-align:center; }
+    .eduBox.ok { background:#f0fdf4; color:#166534; border:2px solid #bbf7d0; }
+    .eduBox.mid { background:#fff7ed; color:#92400e; border:2px solid #fed7aa; }
+    .eduBox.hi { background:#fef2f2; color:#991b1b; border:2px solid #fecaca; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="logo-puskesmas.png" alt="Logo Puskesmas">
+    <h1>Deteksi Skala Nyeri & Edukasi Interaktif Persalinan Nyaman</h1>
+  </header>
+  
+  <main style="padding:14px; max-width:900px; margin:auto; text-align:center;">
+    <div class="controls">
+      <select id="cameraSelect"></select>
+      <button id="startBtn">Mulai Kamera</button>
+      <button id="snapBtn">Ambil Foto</button>
+    </div>
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div id="cameraStatus" class="warn">🔎 Menunggu akses kamera...</div>
+
+    <div id="dialBox" class="dial ok">Skor Nyeri: <span id="painScore">0</span></div>
+
+    <div id="eduBox" class="eduBox ok">💡 Mulai kamera untuk menampilkan edukasi sesuai skala nyeri.</div>
+
+    <h3 style="margin-top:20px;">Snapshot:</h3>
+    <canvas id="snapshot"></canvas>
+  </main>
+
+  <!-- Alarm suara -->
+  <audio id="alarm" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" preload="auto"></audio>
+
+  <!-- Human.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.7.2/dist/human.js"></script>
+  <script>
+    const video = document.getElementById('video');
+    const overlay = document.getElementById('overlay');
+    const ctxOverlay = overlay.getContext('2d');
+    const snapCanvas = document.getElementById('snapshot');
+    const ctxSnap = snapCanvas.getContext('2d');
+    const cameraSelect = document.getElementById('cameraSelect');
+    const statusBox = document.getElementById('cameraStatus');
+    const scoreEl = document.getElementById('painScore');
+    const dialBox = document.getElementById('dialBox');
+    const eduBox = document.getElementById('eduBox');
+    const alarm = document.getElementById('alarm');
+
+    let currentStream;
+    let running = false;
+    let lastAlarm = 0;
+
+    function setStatus(msg, type="ok") {
+      statusBox.textContent = msg;
+      statusBox.className = type;
+    }
+
+    async function loadCameras() {
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        cameraSelect.innerHTML = "";
+        if (videoDevices.length === 0) {
+          setStatus("❌ Tidak ada kamera terdeteksi", "err");
+          return;
+        }
+        videoDevices.forEach((d, i) => {
+          const option = document.createElement('option');
+          option.value = d.deviceId;
+          option.text = d.label || `Kamera ${i+1}`;
+          cameraSelect.appendChild(option);
+        });
+        setStatus("✅ Kamera tersedia. Silakan pilih dan klik 'Mulai Kamera'.", "ok");
+      } catch (e) {
+        setStatus("❌ Gagal memuat daftar kamera: " + e.message, "err");
+      }
+    }
+
+    const human = new Human.Human({
+      backend: 'webgl',
+      modelBasePath: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.7.2/models',
+      face: { enabled: true, detector: { maxDetected: 1 }, mesh: true, emotion: { enabled: true } },
+      body: { enabled: false }, hand: { enabled: false }, object: { enabled: false }
+    });
+
+    async function startCamera(deviceId) {
+      if (currentStream) currentStream.getTracks().forEach(track => track.stop());
+      try {
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: deviceId ? { exact: deviceId } : undefined }
+        });
+        video.srcObject = currentStream;
+        await video.play();
+        overlay.width = video.videoWidth;
+        overlay.height = video.videoHeight;
+        setStatus("📷 Kamera aktif", "ok");
+        running = true;
+        loop();
+      } catch (e) {
+        if (e.name === "NotAllowedError") setStatus("⚠️ Akses kamera ditolak. Silakan izinkan di browser.", "err");
+        else if (e.name === "NotFoundError") setStatus("❌ Kamera tidak ditemukan.", "err");
+        else if (e.name === "NotReadableError") setStatus("⚠️ Kamera sedang dipakai aplikasi lain.", "warn");
+        else setStatus("❌ Gagal membuka kamera: " + e.message, "err");
+      }
+    }
+
+    function computePain(emotions) {
+      const map = {};
+      emotions.forEach(e => map[e.emotion] = e.score || 0);
+      const neg = 0.6*(map['angry']||0) + 0.5*(map['disgust']||0) + 0.4*(map['sad']||0) + 0.6*(map['fear']||0);
+      const pos = 0.5*(map['happy']||0);
+      let p = Math.max(0, neg - pos);
+      return Math.round(p*10);
+    }
+
+    function getEducation(score) {
+      if (score <= 2) return { text:"🌸 Nyeri ringan. Ibu tetap tenang, atur napas perlahan, cari posisi nyaman.", level:"ok" };
+      if (score <= 4) return { text:"🌷 Nyeri mulai terasa. Tarik napas dalam, hembuskan perlahan. Minta pendamping pijat lembut.", level:"ok" };
+      if (score <= 6) return { text:"🌺 Nyeri cukup kuat. Coba ganti posisi (miring kiri/duduk). Gunakan musik relaksasi.", level:"mid" };
+      if (score <= 8) return { text:"💮 Nyeri berat. Fokus pada napas, pegang tangan pendamping, minta kompres hangat.", level:"mid" };
+      return { text:"🌹 Nyeri sangat kuat. Segera sampaikan pada bidan untuk intervensi.", level:"hi" };
+    }
+
+    function updateEducation(score) {
+      const edu = getEducation(score);
+      eduBox.textContent = edu.text;
+      eduBox.className = "eduBox " + edu.level;
+      dialBox.className = "dial " + edu.level;
+    }
+
+    function playAlarmIfNeeded(score) {
+      const now = Date.now();
+      if (score >= 7 && now - lastAlarm > 5000) {
+        alarm.play().catch(()=>{});
+        lastAlarm = now;
+      }
+    }
+
+    async function loop() {
+      if (!running) return;
+      const res = await human.detect(video);
+      const ctx = ctxOverlay;
+      ctx.clearRect(0,0,overlay.width,overlay.height);
+
+      if (res.face && res.face.length > 0) {
+        const f = res.face[0];
+        const box = f.box;
+        ctx.strokeStyle = "#f472b6";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(box[0], box[1], box[2], box[3]);
+
+        const emotions = (f.emotion || []).sort((a,b)=>b.score-a.score);
+        const score = computePain(emotions);
+        scoreEl.textContent = score;
+
+        updateEducation(score);
+        playAlarmIfNeeded(score);
+      } else {
+        scoreEl.textContent = "0";
+        eduBox.textContent = "🌼 Pastikan wajah menghadap kamera & pencahayaan cukup.";
+        eduBox.className = "eduBox warn";
+        dialBox.className = "dial warn";
+      }
+      requestAnimationFrame(loop);
+    }
+
+    function takeSnapshot() {
+      if (!video.srcObject) return setStatus("⚠️ Kamera belum aktif, tidak bisa ambil foto.", "warn");
+      snapCanvas.width = video.videoWidth;
+      snapCanvas.height = video.videoHeight;
+      ctxSnap.drawImage(video, 0, 0, snapCanvas.width, snapCanvas.height);
+      setStatus("📸 Snapshot berhasil diambil", "ok");
+    }
+
+    document.getElementById('startBtn').addEventListener('click', async () => {
+      await human.load(); await human.warmup();
+      await startCamera(cameraSelect.value);
+    });
+    document.getElementById('snapBtn').addEventListener('click', takeSnapshot);
+
+    navigator.mediaDevices.getUserMedia({ video: true })
+      .then(stream => { stream.getTracks().forEach(t => t.stop()); loadCameras(); })
+      .catch(err => setStatus("❌ Tidak bisa akses kamera: " + err.message, "err"));
+  </script>
+</body>
+</html>
